@@ -3,6 +3,7 @@ package mediadevices
 import (
 	"errors"
 	"fmt"
+	"github.com/pion/rtcp"
 	"image"
 	"io"
 	"strings"
@@ -150,6 +151,7 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 	defer track.mu.Unlock()
 
 	signalCh := make(chan chan<- struct{})
+	var stopRead chan struct{}
 	track.activePeerConnections[ctx.ID()] = signalCh
 
 	var encodedReader RTPReadCloser
@@ -175,6 +177,7 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 		var doneCh chan<- struct{}
 		writer := ctx.WriteStream()
 		defer func() {
+			close(stopRead)
 			encodedReader.Close()
 
 			// When there's another call to unbind, it won't block since we mark the signalCh to be closed
@@ -206,6 +209,37 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 			}
 		}
 	}()
+
+	keyFrameController, ok := encodedReader.Controller().(codec.KeyFrameController)
+	if ok {
+		stopRead = make(chan struct{})
+		go func() {
+			reader := ctx.ReadStream()
+			for {
+				select {
+				case <-stopRead:
+					return
+				default:
+				}
+
+				pkts, _, err := reader.ReadRTCP()
+				if err != nil {
+					track.onError(err)
+					return
+				}
+
+				for _, pkt := range pkts {
+					switch pkt.(type) {
+					case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+						if err := keyFrameController.ForceKeyFrame(); err != nil {
+							track.onError(err)
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	return selectedCodec, nil
 }
@@ -327,7 +361,8 @@ func (track *VideoTrack) newEncodedReader(codecNames ...string) (EncodedReadClos
 			}
 			return buffer, release, err
 		},
-		closeFn: encodedReader.Close,
+		closeFn:    encodedReader.Close,
+		controller: encodedReader,
 	}, selectedCodec, nil
 }
 
@@ -365,7 +400,8 @@ func (track *VideoTrack) NewRTPReader(codecName string, ssrc uint32, mtu int) (R
 			pkts := packetizer.Packetize(encoded.Data, encoded.Samples)
 			return pkts, release, err
 		},
-		closeFn: encodedReader.Close,
+		closeFn:    encodedReader.Close,
+		controller: encodedReader.Controller(),
 	}, nil
 }
 
