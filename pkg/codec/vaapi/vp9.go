@@ -1,3 +1,4 @@
+//go:build dragonfly || freebsd || linux || netbsd || openbsd || solaris
 // +build dragonfly freebsd linux netbsd openbsd solaris
 
 package vaapi
@@ -475,14 +476,8 @@ func (e *encoderVP9) Read() ([]byte, func(), error) {
 	return encoded, func() {}, err
 }
 
-// TODO: Implement bit rate control
-//var _ codec.BitRateController = (*encoderVP9)(nil)
-
-// TODO: Implement key frame control
-//var _ codec.KeyFrameController = (*encoderVP9)(nil)
-
 func (e *encoder) Controller() codec.EncoderController {
-	return nil
+	return e
 }
 
 func (e *encoderVP9) Close() error {
