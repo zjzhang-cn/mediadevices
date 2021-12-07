@@ -549,6 +549,10 @@ func (e *encoderVP8) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if e.closed {
+		return nil
+	}
+
 	C.vaDestroySurfaces(e.display, &e.surfs[0], C.int(len(e.surfs)))
 	C.vaDestroyContext(e.display, e.ctxID)
 	C.vaDestroyConfig(e.display, e.confID)
