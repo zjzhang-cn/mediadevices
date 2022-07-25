@@ -3,6 +3,8 @@ package mediadevices
 import (
 	"errors"
 	"fmt"
+	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"image"
 	"io"
 	"strings"
@@ -56,6 +58,8 @@ type Track interface {
 	Kind() webrtc.RTPCodecType
 	// StreamID is the group this track belongs too. This must be unique
 	StreamID() string
+	// RID is the RTP Stearm ID for this track. This is only used for Simulcast
+	RID() string
 	// Bind binds the current track source to the given peer connection. In Pion/webrtc v3, the bind
 	// call will happen automatically after the SDP negotiation. Users won't need to call this manually.
 	Bind(webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error)
@@ -115,6 +119,11 @@ func (track *baseTrack) StreamID() string {
 	return generator.String()
 }
 
+// RID is only relevant if you wish to use Simulcast
+func (track *baseTrack) RID() string {
+	return ""
+}
+
 // OnEnded sets an error handler. When a track has been created and started, if an
 // error occurs, handler will get called with the error given to the parameter.
 func (track *baseTrack) OnEnded(handler func(error)) {
@@ -150,6 +159,7 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 	defer track.mu.Unlock()
 
 	signalCh := make(chan chan<- struct{})
+	var stopRead chan struct{}
 	track.activePeerConnections[ctx.ID()] = signalCh
 
 	var encodedReader RTPReadCloser
@@ -175,6 +185,7 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 		var doneCh chan<- struct{}
 		writer := ctx.WriteStream()
 		defer func() {
+			close(stopRead)
 			encodedReader.Close()
 
 			// When there's another call to unbind, it won't block since we mark the signalCh to be closed
@@ -206,6 +217,40 @@ func (track *baseTrack) bind(ctx webrtc.TrackLocalContext, specializedTrack Trac
 			}
 		}
 	}()
+
+	keyFrameController, ok := encodedReader.Controller().(codec.KeyFrameController)
+	if ok {
+		stopRead = make(chan struct{})
+		go func() {
+			reader := ctx.RTCPReader()
+			for {
+				select {
+				case <-stopRead:
+					return
+				default:
+				}
+
+				var readerBuffer []byte
+				_, _, err := reader.Read(readerBuffer, interceptor.Attributes{})
+				if err != nil {
+					track.onError(err)
+					return
+				}
+
+				pkts, err := rtcp.Unmarshal(readerBuffer)
+
+				for _, pkt := range pkts {
+					switch pkt.(type) {
+					case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+						if err := keyFrameController.ForceKeyFrame(); err != nil {
+							track.onError(err)
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	return selectedCodec, nil
 }
@@ -327,7 +372,8 @@ func (track *VideoTrack) newEncodedReader(codecNames ...string) (EncodedReadClos
 			}
 			return buffer, release, err
 		},
-		closeFn: encodedReader.Close,
+		closeFn:      encodedReader.Close,
+		controllerFn: encodedReader.Controller,
 	}, selectedCodec, nil
 }
 
@@ -365,7 +411,8 @@ func (track *VideoTrack) NewRTPReader(codecName string, ssrc uint32, mtu int) (R
 			pkts := packetizer.Packetize(encoded.Data, encoded.Samples)
 			return pkts, release, err
 		},
-		closeFn: encodedReader.Close,
+		closeFn:      encodedReader.Close,
+		controllerFn: encodedReader.Controller,
 	}, nil
 }
 

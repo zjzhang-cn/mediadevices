@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/blackjack/webcam"
@@ -133,6 +134,19 @@ func newCamera(path string) *camera {
 	return c
 }
 
+func getCameraReadTimeout() uint32 {
+	// default to 5 seconds
+	var readTimeoutSec uint32 = 5
+	if val, ok := os.LookupEnv("PION_MEDIADEVICES_CAMERA_READ_TIMEOUT"); ok {
+		if valInt, err := strconv.Atoi(val); err == nil {
+			if valInt > 0 {
+				readTimeoutSec = uint32(valInt)
+			}
+		}
+	}
+	return readTimeoutSec
+}
+
 func (c *camera) Open() error {
 	cam, err := webcam.Open(c.path)
 	if err != nil {
@@ -179,11 +193,20 @@ func (c *camera) VideoRecord(p prop.Media) (video.Reader, error) {
 		return nil, err
 	}
 
+	if p.FrameRate > 0 {
+		err = c.cam.SetFramerate(float32(p.FrameRate))
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := c.cam.StartStreaming(); err != nil {
 		return nil, err
 	}
 
 	cam := c.cam
+
+	readTimeoutSec := getCameraReadTimeout()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
@@ -200,7 +223,7 @@ func (c *camera) VideoRecord(p prop.Media) (video.Reader, error) {
 				return nil, func() {}, io.EOF
 			}
 
-			err := cam.WaitForFrame(5) // 5 seconds
+			err := cam.WaitForFrame(readTimeoutSec)
 			switch err.(type) {
 			case nil:
 			case *webcam.Timeout:
